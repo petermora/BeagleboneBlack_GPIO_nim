@@ -1,12 +1,77 @@
 import json, tables
 
-var pinData = newTable[string, JsonNode]()
+import macros
 
-let
-  # Use the compile tyme JSon to Nim object converter
-  # This information has been copyed form the bonescript.js project
-  # Find more here: https://github.com/jadonk/bonescript
-  PinIndex = %*
+proc createEmpty(s, d: expr): expr {.compiletime.} =
+  let k = s.kind
+  result = d
+  if k == nnkBracket:
+    if result.isNil:
+      var bracket = newNimNode(nnkBracket)
+      result = prefix(bracket, "@")
+      bracket.add(nil)
+    elif result.kind != nnkPrefix and result[1].kind != nnkBracket:
+      raise newException(Exception, "mixing list with " & $result.kind)
+    for i in 0..<s.len:
+      result[1][0] = createEmpty(s[i], result[1][0])
+  elif k == nnkTableConstr:
+    if result.isNil:
+      result = newNimNode(nnkPar)
+    elif result.kind != nnkPar:
+      raise newException(Exception, "mixing tuple with something else")
+    for i in 0..<s.len:
+      if s[i].kind != nnkExprColonExpr:
+        raise newException(Exception, "use (a: 2) format instead of (2)")
+      var found = false
+      for j in 0..<result.len:
+        if $(result[j][0]) == $(s[i][0]):
+          result[j][1] = createEmpty(s[i][1], result[j][1])
+          found = true
+          break
+      if not found:
+        result.add(newColonExpr(ident($(s[i][0])), createEmpty(s[i][1], nil)))
+  elif k == nnkStrLit:
+    result = newLit("")
+  elif k == nnkIntLit:
+    result = newLit(0)
+  else:
+      raise newException(Exception, "unexpected type " & $k)
+ 
+proc createTuple(s, d: expr): expr {.compiletime.} =
+  let k = d.kind
+  if k == nnkPrefix: # for @[]
+    var bracket = newNimNode(nnkBracket)
+    result = prefix(bracket, "@")
+    if s.isNil or s.len == 0:
+      result = newCall(newNimNode(nnkBracketExpr).add(ident("newSeq")).
+                add(newCall(ident("type"), d[1][0])))
+    else:
+      for i in 0..<s.len:
+        bracket.add(createTuple(s[i], d[1][0]))
+  elif k == nnkPar:
+    result = newNimNode(nnkPar)
+    for j in 0..<d.len:
+      var found = false
+      if not s.isNil:
+        for i in 0..<s.len:
+          if $(d[j][0]) == $(s[i][0]):
+            result.add(newColonExpr(d[j][0],
+              createTuple(s[i][1], d[j][1])))
+            found = true
+            break
+      if not found:
+        result.add(newColonExpr(d[j][0],
+          createTuple(newNilLit(), d[j][1])))
+  elif k == nnkStrLit:
+    result = if s.isNil: d else: s
+  elif k == nnkIntLit:
+    result = if s.isNil: d else: s
+
+macro jsonToTuple(s: expr): expr =
+  let empty = createEmpty(s, nil)
+  createTuple(s, empty)
+
+const PinTuple = jsonToTuple(
       [
         {
             "name": "USR0",
@@ -1527,42 +1592,21 @@ let
             "key": "P9_46"
         }
       ]
-     
-proc loadPin(pin: string): bool =
-  ## Only load pin data when the pin is accessed
-  for i in 0..(PinIndex.len - 1):
-    if PinIndex[i]["key"].str == pin:
-      pinData.add(PinIndex[i]["key"].str, PinIndex[i])
-      return true
-    #end
-  #end
-  return false
-#end
+    )
 
-proc getPinData* (pin: string, subkey: string = ""): JsonNode =
-  ## Return the definition of the respective pin key
-  if pinData.hasKey(pin) or loadPin(pin):
-    if subkey.len == 0:
-      return pinData[pin]
-    elif pinData[pin].hasKey(subkey):
-      return pinData[pin][subkey]
-    else:
-      raise newException(ValueError, "Subkey not found: key='" & pin & "' subkey= '" & subkey & "'")
-    #end
-  else:
-    raise newException(ValueError, "Key not found: '" & pin & "'")
-  #end
-#end
+proc createTable(): Table[string, type(PinTuple[0])] {.compiletime.} =
+  result = initTable[string, type(PinTuple[0])]()
+  for i in 0..<PinTuple.len:
+    result.add(PinTuple[i].key, PinTuple[i])
 
-proc pinHasData* (pin: string, subkey: string): bool =
-  ## Checks if a particular pin has extra information
-  if pinData.hasKey(pin) or loadPin(pin):
-      return pinData[pin].hasKey(subkey)
+const pinData = createTable()
+
+proc getPinData* (key: string): type(PinTuple[0]) =
+  if pinData.hasKey(key):
+    return pinData[key]
   else:
-    raise newException(ValueError, "Key not found: '" & pin & "'")
-  #end
-#end
+    raise newException(ValueError, "Key not found: '" & key & "'")
 
 when isMainModule:
-  assert(getPinData("P9_46")["key"] == "P9_46")
-#end
+  echo getPinData("P9_46")
+  #assert(getPinData("P9_46")["key"].getStr == "P9_46")
